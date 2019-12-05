@@ -14,10 +14,10 @@
 
 import collections, operator
 
-from . import arraytypes as arrays
-from . import scalartypes as scalars
-from . import mathops, jvmops
-from .treelist import ImmutableTreeList
+from ..jvm import arraytypes as arrays
+from ..jvm import scalartypes as scalars
+from ..jvm import mathops, jvmops
+from ..treelist import TreeList
 from .. import flags, dalvik
 
 
@@ -46,13 +46,13 @@ class TypeInfo:
         self.arrs = arrs
         self.tainted = tainted
 
-    def _copy(self): return TypeInfo(self.prims, self.arrs, self.tainted)
+    def _copy(self): return TypeInfo(self.prims.copy(), self.arrs.copy(), self.tainted.copy())
     def _get(self, reg): return self.prims[reg], self.arrs[reg], self.tainted[reg]
 
     def _set(self, reg, st, at, taint=False):
-        self.prims = self.prims.set(reg, st)
-        self.arrs = self.arrs.set(reg, at)
-        self.tainted = self.tainted.set(reg, taint)
+        self.prims[reg] = st
+        self.arrs[reg] = at
+        self.tainted[reg] = taint
         return self
 
     def move(self, src, dest, wide):
@@ -62,11 +62,11 @@ class TypeInfo:
         return new
 
     def assign(self, reg, st, at=arrays.INVALID, taint=False):
-        assert(st is not None)
+        assert st is not None
         return self._copy()._set(reg, st, at, taint)
 
     def assign2(self, reg, st):
-        assert(st is not None)
+        assert st is not None
         at = arrays.INVALID
         return self._copy()._set(reg, st, at)._set(reg+1, scalars.INVALID, at)
 
@@ -78,40 +78,44 @@ class TypeInfo:
         else:
             return self.assign(reg, st, at)
 
+    def isSame(self, other):
+        return (self.prims.data is other.prims.data and
+            self.arrs.data is other.arrs.data and
+            self.tainted.data is other.tainted.data)
+
 def merge(old, new):
-    prims = ImmutableTreeList.merge(old.prims, new.prims, operator.__and__)
-    arrs = ImmutableTreeList.merge(old.arrs, new.arrs, arrays.merge)
-    tainted = ImmutableTreeList.merge(old.tainted, new.tainted, operator.__or__)
-    if prims is old.prims and arrs is old.arrs and tainted is old.tainted:
-        return old
-    return TypeInfo(prims, arrs, tainted)
+    temp = old._copy()
+    temp.prims.merge(new.prims)
+    temp.arrs.merge(new.arrs)
+    temp.tainted.merge(new.tainted)
+    return old if old.isSame(temp) else temp
 
 def fromParams(method, num_regs):
     isstatic = method.access & flags.ACC_STATIC
     full_ptypes = method.id.getSpacedParamTypes(isstatic)
     offset = num_regs - len(full_ptypes)
 
-    prims = ImmutableTreeList(scalars.INVALID)
-    arrs = ImmutableTreeList(arrays.INVALID)
-    tainted = ImmutableTreeList(False)
+    prims = TreeList(scalars.INVALID, operator.__and__)
+    arrs = TreeList(arrays.INVALID, arrays.merge)
+    tainted = TreeList(False, operator.__or__)
 
     for i, desc in enumerate(full_ptypes):
         if desc is not None:
-            prims = prims.set(offset + i, scalars.fromDesc(desc))
-            arrs = arrs.set(offset + i, arrays.fromDesc(desc))
+            prims[offset + i] = scalars.fromDesc(desc)
+            arrs[offset + i] = arrays.fromDesc(desc)
     return TypeInfo(prims, arrs, tainted)
 
 _MATH_THROW_OPS = [jvmops.IDIV, jvmops.IREM, jvmops.LDIV, jvmops.LREM]
 def pruneHandlers(all_handlers):
     result = collections.defaultdict(list)
     for instr, handlers in all_handlers.items():
-        if not isinstance(instr, dalvik.PRUNED_THROW_TYPES):
+        if not instr.type in dalvik.PRUNED_THROW_TYPES:
             continue
         # if math op, make sure it is int div/rem
-        if isinstance(instr, dalvik.BinaryOp):
+        if instr.type == dalvik.BinaryOp:
             if mathops.BINARY[instr.opcode][0] not in _MATH_THROW_OPS:
                 continue
-        elif isinstance(instr, dalvik.BinaryOpConst):
+        elif instr.type == dalvik.BinaryOpConst:
             if mathops.BINARY_LIT[instr.opcode] not in _MATH_THROW_OPS:
                 continue
 
@@ -129,61 +133,61 @@ def pruneHandlers(all_handlers):
 ################################################################################
 # Lots of instructions just return an object or int for type inference purposes
 # so we have a single function for these cases
-def visitRetObj(dex, instr, cur, after):
-    return after.assign(instr.args[0], scalars.OBJ)
-def visitRetInt(dex, instr, cur, after):
-    return after.assign(instr.args[0], scalars.INT)
+def visitRetObj(dex, instr, cur):
+    return cur.assign(instr.args[0], scalars.OBJ)
+def visitRetInt(dex, instr, cur):
+    return cur.assign(instr.args[0], scalars.INT)
 
 # Instruction specific callbacks
-def visitMove(dex, instr, cur, after):
-    return after.move(instr.args[1], instr.args[0], wide=False)
-def visitMoveWide(dex, instr, cur, after):
-    return after.move(instr.args[1], instr.args[0], wide=True)
-def visitMoveResult(dex, instr, cur, after):
-    return after.assignFromDesc(instr.args[0], instr.prev_result)
-def visitConst32(dex, instr, cur, after):
+def visitMove(dex, instr, cur):
+    return cur.move(instr.args[1], instr.args[0], wide=False)
+def visitMoveWide(dex, instr, cur):
+    return cur.move(instr.args[1], instr.args[0], wide=True)
+def visitMoveResult(dex, instr, cur):
+    return cur.assignFromDesc(instr.args[0], instr.prev_result)
+def visitConst32(dex, instr, cur):
     val = instr.args[1] % (1<<32)
     if val == 0:
-        return after.assign(instr.args[0], scalars.ZERO, arrays.NULL)
+        return cur.assign(instr.args[0], scalars.ZERO, arrays.NULL)
     else:
-        return after.assign(instr.args[0], scalars.C32)
-def visitConst64(dex, instr, cur, after):
-    return after.assign2(instr.args[0], scalars.C64)
-def visitCheckCast(dex, instr, cur, after):
+        return cur.assign(instr.args[0], scalars.C32)
+def visitConst64(dex, instr, cur):
+    return cur.assign2(instr.args[0], scalars.C64)
+def visitCheckCast(dex, instr, cur):
     at = arrays.fromDesc(dex.type(instr.args[1]))
-    at = arrays.narrow(after.arrs[instr.args[0]], at)
-    return after.assign(instr.args[0], scalars.OBJ, at)
-def visitNewArray(dex, instr, cur, after):
+    at = arrays.narrow(cur.arrs[instr.args[0]], at)
+    return cur.assign(instr.args[0], scalars.OBJ, at)
+def visitNewArray(dex, instr, cur):
     at = arrays.fromDesc(dex.type(instr.args[2]))
-    return after.assign(instr.args[0], scalars.OBJ, at)
-def visitArrayGet(dex, instr, cur, after):
+    return cur.assign(instr.args[0], scalars.OBJ, at)
+def visitArrayGet(dex, instr, cur):
     arr_at = cur.arrs[instr.args[1]]
     if arr_at is arrays.NULL:
         # This is unreachable, so use (ALL, NULL), which can be merged with anything
-        return after.assign(instr.args[0], scalars.ALL, arrays.NULL)
+        return cur.assign(instr.args[0], scalars.ALL, arrays.NULL)
     else:
         st, at = arrays.eletPair(arr_at)
-        return after.assign(instr.args[0], st, at)
-def visitInstanceGet(dex, instr, cur, after):
+        return cur.assign(instr.args[0], st, at)
+def visitInstanceGet(dex, instr, cur):
     field_id = dex.field_id(instr.args[2])
-    return after.assignFromDesc(instr.args[0], field_id.desc)
-def visitStaticGet(dex, instr, cur, after):
+    return cur.assignFromDesc(instr.args[0], field_id.desc)
+def visitStaticGet(dex, instr, cur):
     field_id = dex.field_id(instr.args[1])
-    return after.assignFromDesc(instr.args[0], field_id.desc)
+    return cur.assignFromDesc(instr.args[0], field_id.desc)
 
-def visitUnaryOp(dex, instr, cur, after):
+def visitUnaryOp(dex, instr, cur):
     _, _, st = mathops.UNARY[instr.opcode]
     if scalars.iswide(st):
-        return after.assign2(instr.args[0], st)
+        return cur.assign2(instr.args[0], st)
     else:
-        return after.assign(instr.args[0], st)
+        return cur.assign(instr.args[0], st)
 
-def visitBinaryOp(dex, instr, cur, after):
+def visitBinaryOp(dex, instr, cur):
     _, st, _ = mathops.BINARY[instr.opcode]
     if scalars.iswide(st):
-        return after.assign2(instr.args[0], st)
+        return cur.assign2(instr.args[0], st)
     else:
-        return after.assign(instr.args[0], st)
+        return cur.assign(instr.args[0], st)
 
 FUNCS = {
     dalvik.ConstString: visitRetObj,
@@ -245,9 +249,9 @@ def doInference(dex, method, code, bytecode, instr_d):
 
             dirty.remove(instr.pos)
             cur = types[instr.pos]
-            itype = type(instr)
+            itype = instr.type
             if itype in FUNCS:
-                after = FUNCS[itype](dex, instr, cur, cur)
+                after = FUNCS[itype](dex, instr, cur)
             elif itype in CONTROL_FLOW_OPS:
                 # control flow - none of these are in FUNCS
                 result = after = after2 = cur
@@ -263,13 +267,13 @@ def doInference(dex, method, code, bytecode, instr_d):
                     else:
                         after = result
 
-                if isinstance(instr, dalvik.Goto):
+                if instr.type == dalvik.Goto:
                     doMerge(instr.args[0], after2)
-                elif isinstance(instr, dalvik.If):
+                elif instr.type == dalvik.If:
                     doMerge(instr.args[2], after2)
-                elif isinstance(instr, dalvik.IfZ):
+                elif instr.type == dalvik.IfZ:
                     doMerge(instr.args[1], after2)
-                elif isinstance(instr, dalvik.Switch):
+                elif instr.type == dalvik.Switch:
                     switchdata = instr_d[instr.args[1]].switchdata
                     for offset in switchdata.values():
                         target = (instr.pos + offset) % (1<<32)
@@ -278,7 +282,7 @@ def doInference(dex, method, code, bytecode, instr_d):
                 after = cur
 
             # these instructions don't fallthrough
-            if not isinstance(instr, (dalvik.Return, dalvik.Throw, dalvik.Goto)):
+            if instr.type not in (dalvik.Return, dalvik.Throw, dalvik.Goto):
                 doMerge(instr.pos2, after)
 
             # exception handlers

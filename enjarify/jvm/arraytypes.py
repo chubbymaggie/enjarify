@@ -19,10 +19,11 @@ from . import scalartypes as scalars
 # use a single value for them (INVALID) and assume all such values are an object
 # array of some type. For primative arrays, we just use the entire array descriptor
 # e.g. b'[[[C', except that bool arrays are treated as byte arrays.
-# For null we use a special marker object (in this case, a unicode string)
+# For null we use a special marker object
 
-INVALID = None # nonref or object or object array
-NULL = 'NULL' # make sure this isn't a bytestring or else it could clash with real descriptors
+# These strings can't be valid descriptors so there's no conflict
+INVALID = b'INVALID'
+NULL = b'NULL'
 
 def merge(t1, t2):
     if t1 is NULL:
@@ -40,15 +41,15 @@ def narrow(t1, t2):
     return t1 if (t1 == t2) else NULL
 
 def eletPair(t):
-    assert(t is not NULL)
+    assert t is not NULL
     if t is INVALID:
         return scalars.OBJ, t
 
-    assert(t.startswith(b'['))
+    assert t.startswith(b'[')
     t = t[1:]
     return scalars.fromDesc(t), t
 
 def fromDesc(desc):
     if not desc.startswith(b'[') or desc.endswith(b';'):
         return INVALID
-    return desc.replace(b'Z', b'B') # treat bool arrays as byte arrays
+    return desc

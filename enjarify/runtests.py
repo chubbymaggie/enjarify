@@ -27,20 +27,20 @@ def executeTest(name, opts):
     print('running test', name)
     dir = os.path.join('tests', name)
     rawdex = read(os.path.join(dir, 'classes.dex'), 'rb')
-    classes, errors = translate(rawdex, opts=opts)
-    assert(not errors)
+    classes, errors = translate(rawdex, opts=opts, allowErrors=False)
 
     classes.update(STUB_FILES)
     writeToJar('out.jar', classes)
 
-    result = subprocess.check_output("java -Xss515m -jar out.jar a.a".split(),
+    result = subprocess.check_output("java -jar out.jar a.a".split(),
         stderr=subprocess.STDOUT,
         universal_newlines=True)
     expected = read(os.path.join(dir, 'expected.txt'), 'r')
-    assert(result == expected)
+    assert result == expected
 
 
 for opts in [options.NONE, options.PRETTY, options.ALL]:
     for i in range(1, 7):
+    # for i in range(1, 8): # todo
         executeTest('test{}'.format(i), opts)
 print('all tests passed!')
